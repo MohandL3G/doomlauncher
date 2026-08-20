@@ -1,0 +1,8 @@
+services:
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: doomlauncher:latest
+    volumes:
+      - ./output:/app
