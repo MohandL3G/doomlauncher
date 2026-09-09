@@ -37,11 +37,20 @@ class SyncManager
             int secondSpace = line.IndexOf(' ', firstSpace + 1);
             if (secondSpace < 0) continue;
 
+            int lastSpace = line.LastIndexOf(' ');
+            long recordedMtime = 0;
+            bool hasMtime = lastSpace > secondSpace && long.TryParse(line.Substring(lastSpace + 1), out recordedMtime);
+
             string backupFile = line.Substring(firstSpace + 1, secondSpace - firstSpace - 1);
-            string originalPath = line.Substring(secondSpace + 1);
+            string originalPath = hasMtime
+                ? line.Substring(secondSpace + 1, lastSpace - secondSpace - 1)
+                : line.Substring(secondSpace + 1);
 
             string srcPath = Path.Combine(backupDir, backupFile);
             if (!File.Exists(srcPath))
+                continue;
+
+            if (hasMtime && File.GetLastWriteTimeUtc(srcPath).Ticks == recordedMtime)
                 continue;
 
             string destDir = type == 'c' ? configDir : saveDir;
@@ -114,7 +123,8 @@ class SyncManager
                 string destPath = Path.Combine(backupDir, backupName);
 
                 File.Copy(filePath, destPath, true);
-                lines.Add($"s {backupName} {relativePath}");
+                long mtime = File.GetLastWriteTimeUtc(destPath).Ticks;
+                lines.Add($"s {backupName} {relativePath} {mtime}");
             }
         }
 
@@ -128,7 +138,8 @@ class SyncManager
                 string destPath = Path.Combine(backupDir, backupName);
 
                 File.Copy(filePath, destPath, true);
-                lines.Add($"c {backupName} {fileName}");
+                long mtime = File.GetLastWriteTimeUtc(destPath).Ticks;
+                lines.Add($"c {backupName} {fileName} {mtime}");
             }
         }
 

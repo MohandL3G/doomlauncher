@@ -66,10 +66,10 @@ All paths are resolved relative to the directory containing `DoomLauncher.exe`.
 
 ## Building
 
-Requires Docker. Run on the build machine:
+Cross-compiled from Linux (build LXC) to `win-x64` with the .NET 8 SDK:
 
 ```sh
-docker compose build
+dotnet publish DoomLauncher/DoomLauncher.csproj -c Release -o output
 ```
 
 The output binary will be in `output/`.
