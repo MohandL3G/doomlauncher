@@ -8,6 +8,10 @@ class SyncManager
 {
     private const string ManifestName = "doomlauncher_sync.manifest";
 
+    // Tab can't appear in a Windows filename, so it's a safe delimiter for
+    // manifest fields even when a save/config filename contains spaces.
+    private const char Delim = '\t';
+
     public static void Restore(string backupDir, string saveDir, string configDir)
     {
         Directory.CreateDirectory(saveDir);
@@ -20,38 +24,39 @@ class SyncManager
         }
         else
         {
+            Logger.Info("No manifest found - falling back to filename scan for restore.");
             RestoreFromScan(backupDir, saveDir, configDir);
         }
     }
 
     private static void RestoreFromManifest(string manifestPath, string backupDir, string saveDir, string configDir)
     {
+        int restored = 0, skipped = 0, missing = 0;
+
         foreach (string rawLine in File.ReadLines(manifestPath))
         {
             string line = rawLine.Trim();
-            if (line.Length < 3 || line[1] != ' ')
+            if (line.Length < 3)
                 continue;
 
-            char type = line[0];
-            int firstSpace = line.IndexOf(' ');
-            int secondSpace = line.IndexOf(' ', firstSpace + 1);
-            if (secondSpace < 0) continue;
-
-            int lastSpace = line.LastIndexOf(' ');
-            long recordedMtime = 0;
-            bool hasMtime = lastSpace > secondSpace && long.TryParse(line.Substring(lastSpace + 1), out recordedMtime);
-
-            string backupFile = line.Substring(firstSpace + 1, secondSpace - firstSpace - 1);
-            string originalPath = hasMtime
-                ? line.Substring(secondSpace + 1, lastSpace - secondSpace - 1)
-                : line.Substring(secondSpace + 1);
+            if (!TryParseManifestLine(line, out char type, out string backupFile, out string originalPath, out bool hasMtime, out long recordedMtime))
+            {
+                Logger.Warn($"Skipping unparseable manifest line: {line}");
+                continue;
+            }
 
             string srcPath = Path.Combine(backupDir, backupFile);
             if (!File.Exists(srcPath))
+            {
+                missing++;
                 continue;
+            }
 
             if (hasMtime && File.GetLastWriteTimeUtc(srcPath).Ticks == recordedMtime)
+            {
+                skipped++;
                 continue;
+            }
 
             string destDir = type == 'c' ? configDir : saveDir;
             string destPath = Path.Combine(destDir, originalPath.Replace('/', '\\'));
@@ -60,8 +65,73 @@ class SyncManager
             if (destParent != null && !Directory.Exists(destParent))
                 Directory.CreateDirectory(destParent);
 
-            File.Copy(srcPath, destPath, true);
+            try
+            {
+                File.Copy(srcPath, destPath, true);
+                restored++;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to restore '{originalPath}': {ex.Message}");
+            }
         }
+
+        Logger.Info($"Restore complete: {restored} restored, {skipped} unchanged, {missing} missing from backup.");
+    }
+
+    /// <summary>
+    /// Parses one manifest line. Supports the current tab-delimited format
+    /// ("type\tbackupFile\toriginalPath\tmtime") and falls back to the
+    /// legacy space-delimited format for manifests written by older builds
+    /// (which breaks on filenames containing spaces - that's exactly why
+    /// the format changed, but old manifests still need to be readable).
+    /// </summary>
+    private static bool TryParseManifestLine(string line, out char type, out string backupFile, out string originalPath, out bool hasMtime, out long recordedMtime)
+    {
+        type = '\0';
+        backupFile = "";
+        originalPath = "";
+        hasMtime = false;
+        recordedMtime = 0;
+
+        if (line.IndexOf(Delim) >= 0)
+        {
+            string[] parts = line.Split(Delim);
+            if (parts.Length < 3 || parts[0].Length != 1)
+                return false;
+
+            type = parts[0][0];
+            backupFile = parts[1];
+            originalPath = parts[2];
+
+            if (parts.Length >= 4 && long.TryParse(parts[3], out long mtime))
+            {
+                hasMtime = true;
+                recordedMtime = mtime;
+            }
+
+            return backupFile.Length > 0;
+        }
+
+        // Legacy space-delimited format: "type backupFile originalPath [mtime]"
+        if (line[1] != ' ')
+            return false;
+
+        type = line[0];
+        int firstSpace = line.IndexOf(' ');
+        int secondSpace = line.IndexOf(' ', firstSpace + 1);
+        if (secondSpace < 0)
+            return false;
+
+        int lastSpace = line.LastIndexOf(' ');
+        hasMtime = lastSpace > secondSpace && long.TryParse(line.Substring(lastSpace + 1), out recordedMtime);
+
+        backupFile = line.Substring(firstSpace + 1, secondSpace - firstSpace - 1);
+        originalPath = hasMtime
+            ? line.Substring(secondSpace + 1, lastSpace - secondSpace - 1)
+            : line.Substring(secondSpace + 1);
+
+        return backupFile.Length > 0;
     }
 
     private static void RestoreFromScan(string backupDir, string saveDir, string configDir)
@@ -110,6 +180,7 @@ class SyncManager
         Directory.CreateDirectory(backupDir);
 
         var lines = new List<string>();
+        var currentBackupFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         if (Directory.Exists(saveDir))
         {
@@ -124,7 +195,8 @@ class SyncManager
 
                 File.Copy(filePath, destPath, true);
                 long mtime = File.GetLastWriteTimeUtc(destPath).Ticks;
-                lines.Add($"s {backupName} {relativePath} {mtime}");
+                lines.Add($"s{Delim}{backupName}{Delim}{relativePath}{Delim}{mtime}");
+                currentBackupFiles.Add(backupName);
             }
         }
 
@@ -139,11 +211,45 @@ class SyncManager
 
                 File.Copy(filePath, destPath, true);
                 long mtime = File.GetLastWriteTimeUtc(destPath).Ticks;
-                lines.Add($"c {backupName} {fileName} {mtime}");
+                lines.Add($"c{Delim}{backupName}{Delim}{fileName}{Delim}{mtime}");
+                currentBackupFiles.Add(backupName);
             }
         }
 
         string manifestPath = Path.Combine(backupDir, ManifestName);
         File.WriteAllLines(manifestPath, lines);
+
+        int removed = RemoveOrphanedBackups(backupDir, currentBackupFiles);
+        Logger.Info($"Backup complete: {lines.Count} files backed up, {removed} orphaned backup file(s) removed.");
+    }
+
+    /// <summary>
+    /// Deletes .sav files in backupDir that no longer correspond to any file
+    /// currently present in saveDir/configDir (e.g. saves that were deleted
+    /// locally). Without this, deleted saves accumulate forever in the
+    /// Steam Cloud-synced backup folder.
+    /// </summary>
+    private static int RemoveOrphanedBackups(string backupDir, HashSet<string> currentBackupFiles)
+    {
+        int removed = 0;
+
+        foreach (string filePath in Directory.GetFiles(backupDir, "*.sav"))
+        {
+            string backupName = Path.GetFileName(filePath);
+            if (currentBackupFiles.Contains(backupName))
+                continue;
+
+            try
+            {
+                File.Delete(filePath);
+                removed++;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to remove orphaned backup '{backupName}': {ex.Message}");
+            }
+        }
+
+        return removed;
     }
 }

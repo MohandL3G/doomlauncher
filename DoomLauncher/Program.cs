@@ -57,6 +57,8 @@ UzDoomConfigDir=
         string exeDir = AppContext.BaseDirectory;
         string configPath = Path.Combine(exeDir, "config.ini");
 
+        Logger.Init(exeDir);
+
         if (!File.Exists(configPath))
         {
             File.WriteAllText(configPath, DefaultConfig);
@@ -140,10 +142,28 @@ UzDoomConfigDir=
 
         if (doSync)
         {
-            string backupDirFull = Path.GetFullPath(backupDir);
-            string saveDirFull = Path.GetFullPath(saveDir);
-            string configDirFull = Path.GetFullPath(configDir);
-            SyncManager.Restore(backupDirFull, saveDirFull, configDirFull);
+            try
+            {
+                string backupDirFull = Path.GetFullPath(backupDir);
+                string saveDirFull = Path.GetFullPath(saveDir);
+                string configDirFull = Path.GetFullPath(configDir);
+                SyncManager.Restore(backupDirFull, saveDirFull, configDirFull);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Restore failed: {ex.Message}");
+
+                var page = new TaskDialogPage
+                {
+                    Caption = "DoomLauncher",
+                    Heading = "Error restoring saves.",
+                    Text = $"Could not restore saves/configs from the backup folder:\n{ex.Message}\n\nUZDoom will still be launched with whatever saves are currently in place.",
+                    Icon = TaskDialogIcon.Warning,
+                    Buttons = { TaskDialogButton.OK }
+                };
+                TaskDialog.ShowDialog(page);
+                // Non-fatal: a failed restore shouldn't stop the game from launching.
+            }
         }
 
         var startInfo = new ProcessStartInfo
@@ -210,14 +230,18 @@ UzDoomConfigDir=
 
                 var result = TaskDialog.ShowDialog(page);
 
-                if (result == copyBtn && hasDefault)
+                if (result == copyBtn)
                 {
+                    // copyBtn is only ever added to the dialog when hasDefault
+                    // is true (see above), so reaching here implies a default
+                    // config exists to copy from.
                     File.Copy(defaultConfigPath, configFilePath);
                     commandLine += $"-config \"{configFilePath}\" ";
                 }
-                else if (result == copyBtn && !hasDefault)
+                else if (result == useDefaultBtn)
                 {
-                    commandLine += $"-config \"{configFilePath}\" ";
+                    // Deliberately don't append -config: omitting the flag
+                    // is what makes UZDoom fall back to its own default.
                 }
             }
         }
@@ -248,10 +272,28 @@ UzDoomConfigDir=
 
                 if (doSync)
                 {
-                    string backupDirFull = Path.GetFullPath(backupDir);
-                    string saveDirFull = Path.GetFullPath(saveDir);
-                    string configDirFull = Path.GetFullPath(configDir);
-                    SyncManager.Backup(backupDirFull, saveDirFull, configDirFull);
+                    try
+                    {
+                        string backupDirFull = Path.GetFullPath(backupDir);
+                        string saveDirFull = Path.GetFullPath(saveDir);
+                        string configDirFull = Path.GetFullPath(configDir);
+                        SyncManager.Backup(backupDirFull, saveDirFull, configDirFull);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"Backup failed: {ex.Message}");
+
+                        var page = new TaskDialogPage
+                        {
+                            Caption = "DoomLauncher",
+                            Heading = "Error backing up saves.",
+                            Text = $"UZDoom exited normally, but saves/configs could not be backed up:\n{ex.Message}",
+                            Icon = TaskDialogIcon.Warning,
+                            Buttons = { TaskDialogButton.OK }
+                        };
+                        TaskDialog.ShowDialog(page);
+                        // Non-fatal: still report the game's own exit code below.
+                    }
                 }
 
                 return proc.ExitCode;
