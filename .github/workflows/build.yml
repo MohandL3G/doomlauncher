@@ -62,6 +62,9 @@ jobs:
     name: Refresh continuous pre-release
     needs: [shim, launcher]
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -74,16 +77,9 @@ jobs:
           cp dist/DoomLauncher/DoomLauncher.exe out/
           sha256sum out/* | tee out/SHA256SUMS.txt
 
-      - name: Delete old continuous release
+      - name: Publish release assets
         shell: bash
         run: |
-          gh release delete shim-latest --yes --cleanup-tag || true
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Create continuous release
-        shell: bash
-        run: |
-          gh release create shim-latest out/* --prerelease --title "shim-latest" --notes "Rolling build of ${{ github.sha }}. Assets: steam_api64.dll (shim), DoomLauncher.exe, SHA256SUMS.txt."
-        env:
-          GH_TOKEN: ${{ github.token }}
+          gh release view shim-latest >/dev/null 2>&1 || \
+            gh release create shim-latest --prerelease --title "shim-latest" --notes "Rolling continuous build. Assets: steam_api64.dll (shim), DoomLauncher.exe, SHA256SUMS.txt; VERSION.txt holds the source commit."
+          gh release upload shim-latest out/* --clobber
