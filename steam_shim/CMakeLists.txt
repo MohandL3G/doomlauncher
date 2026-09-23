@@ -12,6 +12,11 @@ endif()
 
 add_library(steam_api64 SHARED steam_api64.c steam_api64.def)
 
+# Static CRT: the shim must have no runtime DLL dependencies beyond kernel32
+# (a /MD build imports api-ms-win-crt-* and fails to load on machines without
+# the VC++ redist — discovered the hard way with error 126).
+set_property(TARGET steam_api64 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
 target_compile_definitions(steam_api64 PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 target_link_libraries(steam_api64 PRIVATE kernel32)
 
