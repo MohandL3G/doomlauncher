@@ -180,13 +180,15 @@ $steamEngine = $engineNames | Where-Object { $_ -match '^(SteamAPI_|SteamInterna
 $lines = @(
     "; steam_api64.def — regenerated $(Get-Date -Format u) by generate-exports.ps1",
     "; Engine: $EngineExe   Valve DLL: $ValveDll",
+    "",
+    "EXPORTS",
     ""
 )
 
 $missing = @()
 foreach ($name in $steamEngine) {
     if ($valveExports -contains $name) {
-        $lines += $name
+        $lines += "$name=steam_api64_o.$name"
     } else {
         $missing += $name
     }
