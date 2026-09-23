@@ -75,11 +75,15 @@ jobs:
           sha256sum out/* | tee out/SHA256SUMS.txt
 
       - name: Delete old continuous release
-        run: gh release delete shim-latest --yes --cleanup-tag || true
+        shell: bash
+        run: |
+          gh release delete shim-latest --yes --cleanup-tag || true
         env:
           GH_TOKEN: ${{ github.token }}
 
       - name: Create continuous release
-        run: gh release create shim-latest out/* --prerelease --title "shim-latest" --notes "Rolling build of ${{ github.sha }}. Assets: steam_api64.dll (shim), DoomLauncher.exe, SHA256SUMS.txt."
+        shell: bash
+        run: |
+          gh release create shim-latest out/* --prerelease --title "shim-latest" --notes "Rolling build of ${{ github.sha }}. Assets: steam_api64.dll (shim), DoomLauncher.exe, SHA256SUMS.txt."
         env:
           GH_TOKEN: ${{ github.token }}
