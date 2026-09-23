@@ -1,0 +1,85 @@
+name: build
+
+on:
+  push:
+    paths:
+      - "steam_shim/**"
+      - "DoomLauncher/**"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  shim:
+    name: Build steam_api64 shim (MSVC x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S steam_shim -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --target steam_api64
+
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/Release/steam_api64.dll dist/steam_api64.dll
+          Get-FileHash dist/steam_api64.dll -Algorithm SHA256 | Tee-Object -Variable hash
+          (Get-Content env:GITHUB_SHA).Substring(0, 8) | Set-Content dist/VERSION.txt
+          "shim_sha256=$(($hash.Hash).ToLower())" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Upload shim artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam_api64-shim
+          path: dist/
+
+  launcher:
+    name: Build DoomLauncher (.NET 8 win-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish
+        run: dotnet publish DoomLauncher/DoomLauncher.csproj -c Release -o output
+
+      - name: Upload launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoomLauncher
+          path: output/DoomLauncher.exe
+
+  release:
+    name: Refresh continuous pre-release
+    needs: [shim, launcher]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p out
+          cp dist/steam_api64-shim/* out/
+          cp dist/DoomLauncher/DoomLauncher.exe out/
+          sha256sum out/* | tee out/SHA256SUMS.txt
+
+      - name: Delete old continuous release
+        run: gh release delete shim-latest --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create continuous release
+        run: gh release create shim-latest out/* --prerelease --title "shim-latest" --notes "Rolling build of ${{ github.sha }}. Assets: steam_api64.dll (shim), DoomLauncher.exe, SHA256SUMS.txt."
+        env:
+          GH_TOKEN: ${{ github.token }}

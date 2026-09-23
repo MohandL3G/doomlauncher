@@ -64,12 +64,36 @@ How it works:
 
 All paths are resolved relative to the directory containing `DoomLauncher.exe`.
 
+## Steam integration (steam_api64.dll shim)
+
+Instead of hijacking `doom.exe` with a hardlink, the repo ships a tiny proxy `steam_api64.dll` (see `steam_shim/`). When the real engine loads its Steamworks DLL, the shim forwards every Steamworks export to the original Valve DLL (renamed to `steam_api64_o.dll`) and starts `DoomLauncher.exe` from the same folder.
+
+Steam's Play button therefore launches UZDoom through DoomLauncher, while the engine process keeps a fully functional (unmodified, forwarded) Steamworks: overlay, achievements, Steam Cloud and play-state all behave normally. If the shim or launcher files are removed, the game simply runs vanilla.
+
+The shim forwards nothing it hooks — the forwarding is done by the linker as export-forwarding records, so there is zero Steamworks-altering code. `steam_api64.def` lists the forwarded symbols; if a DOOM engine update changes its import table, regenerate it with `steam_shim/generate-exports.ps1` (see the script header) and rebuild.
+
+### Install (game rerelease folder)
+
+1. Copy the original Valve `steam_api64.dll` to `steam_api64_o.dll` (and keep a pristine copy as `steam_api64.dll.orig` for rollback).
+2. Copy the shim build's `steam_api64.dll` into the folder.
+3. Keep `DoomLauncher.exe` + `config.ini` next to it (as before).
+4. `doom.exe` must be the ORIGINAL engine exe (no hardlink needed anymore).
+
+### Uninstall / rollback
+
+Delete the shim `steam_api64.dll`, rename `steam_api64_o.dll` (or `steam_api64.dll.orig`) back to `steam_api64.dll`. Nothing else changes.
+
 ## Building
 
-Cross-compiled from Linux (build LXC) to `win-x64` with the .NET 8 SDK:
+GitHub Actions (`.github/workflows/build.yml`) builds both components on every push touching them and attaches them to the rolling `shim-latest` pre-release:
+
+- `steam_api64.dll` — MSVC x64 shim (windows-latest, CMake)
+- `DoomLauncher.exe` — .NET 8 win-x64 single-file publish (ubuntu-latest)
+
+Locally, the launcher still builds with the .NET 8 SDK:
 
 ```sh
 dotnet publish DoomLauncher/DoomLauncher.csproj -c Release -o output
 ```
 
-The output binary will be in `output/`.
+The shim needs MSVC (the `.def` uses MSVC export-forwarding syntax): `cmake -S steam_shim -B build -A x64 && cmake --build build --config Release`.

@@ -1,0 +1,40 @@
+; steam_api64.def — linker export-forwarding table for the DoomLauncher shim.
+;
+; Every entry forwards <name> to <name> exported by steam_api64_o.dll (the
+; original Valve DLL, renamed). The linker implements these as export
+; forwarding records — the DLL contains no forwarding code of its own.
+;
+; This list contains only symbol NAMES (facts about the Steamworks ABI), not
+; Valve code, so it is safe to commit. It was generated from the DOOM rerelease
+; engine's import table plus a verified presence check against Valve's shipped
+; steam_api64.dll (a forward to a missing export would break module load).
+;
+; If an engine update changes the import table, regenerate with
+; generate-exports.ps1 — symptom: the game fails to start with the shim
+; installed and steam_shim.log shows nothing (the loader itself refuses to
+; load the shim).
+
+; --- Steam API (all imported by the kex engine; extras verified present) ---
+SteamAPI_Init
+SteamAPI_RestartAppIfNecessary
+SteamAPI_RegisterCallback
+SteamAPI_UnregisterCallback
+SteamAPI_RegisterCallResult
+SteamAPI_UnregisterCallResult
+SteamAPI_RunCallbacks
+SteamAPI_Shutdown
+SteamAPI_GetHSteamUser
+SteamAPI_IsSteamRunning
+SteamAPI_ManualDispatch_Init
+SteamAPI_ManualDispatch_RunFrame
+SteamInternal_ContextInit
+SteamInternal_FindOrCreateUserInterface
+
+; --- Bare HSteam handles (legacy ABI, verified present) ---
+GetHSteamUser
+GetHSteamPipe
+
+; --- Game server API (verified present; harmless if unused) ---
+SteamGameServer_Init
+SteamGameServer_Shutdown
+SteamGameServer_RunCallbacks

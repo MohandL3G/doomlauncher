@@ -2,31 +2,25 @@
 
 ## Build
 
-Cross-compile from Linux to Windows (`win-x64`) with the .NET 8 SDK directly — no Docker. Build box is a Debian 13 LXC (CT 122, hostname `building`) on the PVE host, reached via `ssh pve` + `pct exec 122`. SDK 8.0.425 at `/opt/dotnet` (symlinked into `/usr/local/bin`).
+GitHub Actions (`.github/workflows/build.yml`) builds both components:
 
-```sh
-# Sync the working tree (incl. uncommitted changes) to the LXC
-tar -cf doomlauncher_src.tar --exclude=.git --exclude=output -C <repo-root> .
-scp doomlauncher_src.tar pve:/root/
-ssh pve "pct push 122 /root/doomlauncher_src.tar /root/doomlauncher_src.tar && pct exec 122 -- bash -c 'mkdir -p /root/doomlauncher && tar -xf /root/doomlauncher_src.tar -C /root/doomlauncher'"
+- **Shim** — `windows-latest`, CMake + MSVC x64: `cmake -S steam_shim -B build -A x64 && cmake --build build --config Release --target steam_api64`. Artifact `steam_api64-shim`, also attached to the rolling `shim-latest` pre-release.
+- **Launcher** — `ubuntu-latest`, .NET 8 SDK: `dotnet publish DoomLauncher/DoomLauncher.csproj -c Release -o output`. Artifact `DoomLauncher`, same release.
 
-# Build
-ssh pve "pct exec 122 -- bash -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; cd /root/doomlauncher && dotnet publish DoomLauncher/DoomLauncher.csproj -c Release -o output'"
-
-# Fetch the binary back
-ssh pve "pct pull 122 /root/doomlauncher/output/DoomLauncher.exe /root/DoomLauncher.exe"
-scp pve:/root/DoomLauncher.exe output/
-```
-
-Output: `output/DoomLauncher.exe`
+The historical build LXC (CT 122) is destroyed; do not reference it. Releases are public, so fresh artifacts are fetchable locally without auth:
+`https://github.com/MohandL3G/doomlauncher/releases/latest/download/steam_api64.dll` — NOTE: this resolves to the rolling `shim-latest` release only while it is the most recent release; after any versioned release, pin the tag explicitly.
 
 ## Deploy
 
-Copy `DoomLauncher.exe` and `config.ini` to the rerelease directory:
+Game dir: `C:\Program Files (x86)\Steam\steamapps\common\Ultimate Doom\rerelease\`
 
-```
-C:\Program Files (x86)\Steam\steamapps\common\Ultimate Doom\rerelease\
-```
+- `doom.exe` — ORIGINAL engine exe (verify vs `doom.exe.old`; never a launcher hardlink)
+- `steam_api64.dll` — the shim (hash must match the CI artifact)
+- `steam_api64_o.dll` — Valve's original Steamworks DLL, renamed
+- `steam_api64.dll.orig` — untouched copy of Valve's DLL (rollback)
+- `DoomLauncher.exe` + `config.ini` — launcher, as before
+
+Shim debug log: `steam_shim.log` next to the game exe (written only on launcher-spawn failures/successes).
 
 ## Project structure
 
@@ -35,20 +29,25 @@ C:\Program Files (x86)\Steam\steamapps\common\Ultimate Doom\rerelease\
 - `DoomLauncher/SyncManager.cs` — Save/config backup and restore logic
 - `DoomLauncher/Logger.cs` — Best-effort append-only log at `doomlauncher.log` next to the exe (rotates to `.old` at 1 MB)
 - `DoomLauncher/DoomLauncher.csproj` — .NET 8, `WinExe`, `PublishSingleFile=true`, `SelfContained=false`
-- `EnableWindowsTargeting` is `true` in the csproj — required for cross-compiling WinForms from Linux
+- `steam_shim/steam_api64.c` — Proxy shim: spawns `DoomLauncher.exe` on DLL_PROCESS_ATTACH; forwards nothing itself
+- `steam_shim/steam_api64.def` — Export-forwarding table; every entry forwards `<name>` → `steam_api64_o.<name>` (linker-level, no code)
+- `steam_shim/generate-exports.ps1` — Regenerates the def from a Valve DLL + engine exe (run after engine updates)
 - `config.ini` — User-edited config (do not overwrite)
 
 ## Key details
 
-- .NET 8 Desktop Runtime required on target machine
-- `pct exec 122` shells start with an empty `PATH` — export it explicitly before running dotnet
-- `pct push` destination must be a full file path (trailing dir throws "Is a directory")
+- The shim must NEVER hook or wrap Steamworks; forwarding is linker export-forwarding to `steam_api64_o.dll`. Nothing Valve-signed is modified.
+- Def entries must only reference exports that exist in the INSTALLED Valve DLL (`SteamAPI_InitEx`/`InitFlat`/`ManualDispatch_GetNextEvent` are NOT present in the current one — verified). A forward to a missing export breaks module load.
+- Engine imports exactly 11 Steamworks symbols (verified from `doom.exe.old` import table); the def covers those plus verified-safe extras.
+- Shim code is CRT-free in DllMain (kernel32 only, stack buffers, no thread-attach work) — loader-lock safe. A single-instance mutex (`Local\DoomLauncherShimMutex`) prevents double launcher spawns.
+- If `config.ini` is missing the shim stays silent (game runs vanilla); if `config.ini` exists but `DoomLauncher.exe` is missing it logs and continues.
+- .NET 8 Desktop Runtime required on target machine for the launcher
 - `Application.EnableVisualStyles()` is required before showing `TaskDialog`
-- Config file is read from `AppContext.BaseDirectory` (same dir as exe)
-- Relative paths in config are resolved relative to the config file's directory
+- Config file is read from `AppContext.BaseDirectory` (same dir as exe); relative config paths resolve against the config file's directory
 - Sync manifest is `doomlauncher_sync.manifest` in the backup dir; when missing, existing `.sav` files are auto-scanned
 - Manifest fields are tab-delimited (`type\tbackupFile\toriginalPath\tmtime`) so filenames containing spaces parse correctly; the legacy space-delimited format (pre-fix) is still read for manifests written by older builds
 - Manifest lines carry a trailing mtime-tick field; `RestoreFromManifest` skips files whose backup mtime is unchanged since last sync (crash-safe — prevents stale backups overwriting newer local saves). Old manifests without the field always restore
 - `Backup` removes `.sav` files in the backup dir that no longer correspond to a local save/config (prevents unbounded growth in the Steam Cloud-synced folder)
 - Saves are flattened with `.sav` extension for Steam Cloud compatibility (e.g. `doom.id.doom2.kex.save00.zds.sav`)
 - Restore and Backup each have their own try/catch in `Program.cs`, separate from the launch try/catch, so a sync failure is never reported as a launch failure and never blocks the game from starting or its exit code from being returned
+- Steam may re-download `doom.exe`/`steam_api64.dll` on verify/update, wiping shim+rename; recovery = re-copy shim + rename `steam_api64_o.dll` (2 files, documented in README)
