@@ -21,9 +21,10 @@
 // save backup), the worker terminates the frozen engine with the launcher's
 // exit code, ending the Steam session at the right moment.
 //
-// If the main thread cannot be suspended, the worker falls back to the old
-// instant-kill behavior (TerminateProcess on self) rather than letting the
-// engine boot alongside UZDoom or leaving the process hung.
+// If the main thread cannot be frozen safely (suspend failure, or it never
+// leaves the loader walk within the attempt budget), the worker falls back to
+// the old instant-kill behavior (TerminateProcess on self) rather than
+// deadlocking or leaving the engine running alongside UZDoom.
 //
 // If DoomLauncher.exe or config.ini is missing, the shim does nothing and the game
 // launches vanilla through the forwards — deleting the launcher files (or renaming
@@ -281,12 +282,24 @@ static void ShimStartLauncher(void)
     CloseHandle(hWorker); // we never join the worker; it lives for the session
 }
 
-// Worker thread: suspends the engine's main thread BEFORE it can reach main()
-// (no window, no audio, no Steamworks calls, 0% CPU), then runs DoomLauncher
+// Worker thread: freezes the engine's main thread BEFORE it can run the engine
+// (no window, no audio, no Steamworks calls, ~0% CPU), then runs DoomLauncher
 // and keeps the engine process alive — suspended — for the whole UZDoom
 // session so Steam accrues playtime. When the launcher exits (it waits for
 // UZDoom and performs the save backup), the engine is terminated with the
 // launcher's exit code, which ends the Steam session.
+//
+// Loader-lock rendezvous (why a plain SuspendThread is not enough): the main
+// thread spends the first moments of its life inside the loader's DLL-init
+// walk HOLDING the loader lock. If it is frozen there, every loader-lock
+// operation from this worker (CreateProcessW among them) deadlocks forever —
+// the lock owner can never run again. So each suspend is followed by a RIP
+// check: if the main thread was caught inside ntdll (or anywhere outside the
+// main exe image), it is resumed and the suspend retried. Only when RIP is
+// inside the main exe image is the freeze kept — the walk is provably done
+// (the exe entry point only runs after the loader releases the lock), so the
+// engine is frozen at its entry code: before any window, audio, or Steamworks
+// initialization.
 static DWORD WINAPI ShimWorkerThread(LPVOID arg)
 {
     (void)arg;
@@ -302,17 +315,67 @@ static DWORD WINAPI ShimWorkerThread(LPVOID arg)
     }
 
     // Freeze the main thread FIRST — before spawning anything. This is the only
-    // instant at which the engine could get past DllMain and start creating a
-    // window or audio, so the suspend must land as the very first action.
-    if (g_hMainThread == NULL || SuspendThread(g_hMainThread) == (DWORD)-1)
+    // instant at which the engine could start creating a window or audio, so
+    // the freeze must land before the engine runs. See the rendezvous comment
+    // above for why the first suspend usually lands mid loader-walk and must
+    // not be kept: freezing the loader-lock owner deadlocks CreateProcessW.
+    DWORD freezeErr = 0;
+    BOOL frozen = FALSE;
+    for (DWORD attempt = 0; attempt < 2000 && g_hMainThread != NULL; attempt++)
     {
-        // Cannot freeze: fall back to the previous instant-kill behavior rather
-        // than letting the engine boot alongside UZDoom or hanging forever.
-        ShimLogW(dir, L"Failed to suspend main thread; terminating engine (fallback).", GetLastError());
+        if (SuspendThread(g_hMainThread) == (DWORD)-1)
+        {
+            freezeErr = GetLastError();
+            break; // cannot suspend at all -> fallback below
+        }
+
+        // Suspended: verify WHERE we caught the main thread before keeping it.
+        CONTEXT ctx;
+        SecureZeroMemory(&ctx, sizeof(ctx));
+        ctx.ContextFlags = CONTEXT_CONTROL;
+        BOOL safe = FALSE;
+        if (GetThreadContext(g_hMainThread, &ctx) && ctx.Rip != 0)
+        {
+            HMODULE hExe = GetModuleHandleW(NULL);
+            MEMORY_BASIC_INFORMATION mbi;
+            if (hExe != NULL &&
+                VirtualQuery((LPCVOID)ctx.Rip, &mbi, sizeof(mbi)) == sizeof(mbi) &&
+                mbi.AllocationBase == hExe)
+            {
+                safe = TRUE; // inside the exe = loader walk done, lock free
+            }
+        }
+
+        if (safe)
+        {
+            // Residual corner (accepted): if the exe registered TLS callbacks,
+            // a freeze landing exactly inside one would still hold the loader
+            // lock despite RIP being in the exe. The window is microseconds
+            // wide and modern MSVC exes rarely use TLS callbacks, so this is
+            // not worth more machinery.
+            frozen = TRUE;
+            break;
+        }
+
+        // Caught inside the loader walk (lock held): resume and retry shortly.
+        ResumeThread(g_hMainThread);
+        Sleep(1);
+    }
+
+    if (!frozen)
+    {
+        // Cannot freeze safely (suspend failure, or the main thread never left
+        // the loader walk within the attempt budget): fall back to the previous
+        // instant-kill behavior rather than deadlock or hang.
+        ShimLogW(dir,
+                 freezeErr != 0
+                     ? L"Failed to suspend main thread; terminating engine (fallback)."
+                     : L"Main thread never left the loader walk; terminating engine (fallback).",
+                 freezeErr);
         TerminateProcess(GetCurrentProcess(), 0);
         return 1;
     }
-    ShimLogW(dir, L"Main thread suspended; engine frozen before main().", 0);
+    ShimLogW(dir, L"Main thread suspended; engine frozen at entry (loader lock free).", 0);
 
     wchar_t exePath[MAX_PATH];
     if (!ShimJoinPathW(exePath, MAX_PATH, dir, LAUNCHER_EXE_NAME))
