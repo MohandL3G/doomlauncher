@@ -148,6 +148,10 @@ static BOOL ShimSelfDirW(const void *marker, wchar_t *outDir, DWORD outDirCch)
 static BOOL ShimJoinPathW(wchar_t *outPath, DWORD outPathCch,
                           const wchar_t *dir, const wchar_t *fileName)
 {
+    // ShimStrAppendW measures dst with ShimStrLenW, so the caller's buffer MUST
+    // start empty — an uninitialized stack buffer scans as garbage length and
+    // silently fails every join (this bug made the whole launcher path a no-op).
+    outPath[0] = L'\0';
     if (!ShimStrAppendW(outPath, outPathCch, dir))
         return FALSE;
     if (!ShimStrAppendW(outPath, outPathCch, L"\\"))
