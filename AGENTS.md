@@ -20,7 +20,7 @@ Game dir: `C:\Program Files (x86)\Steam\steamapps\common\Ultimate Doom\rerelease
 - `steam_api64.dll.orig` — untouched copy of Valve's DLL (rollback)
 - `DoomLauncher.exe` + `config.ini` — launcher, as before
 
-Shim debug log: `steam_shim.log` next to the game exe (attach detection, launcher-spawn success/failure, engine-termination line).
+Shim debug log: `steam_shim.log` next to the game exe (attach detection, main-thread suspend, launcher-spawn success/failure, engine termination).
 
 ## Project structure
 
@@ -29,7 +29,7 @@ Shim debug log: `steam_shim.log` next to the game exe (attach detection, launche
 - `DoomLauncher/SyncManager.cs` — Save/config backup and restore logic
 - `DoomLauncher/Logger.cs` — Best-effort append-only log at `doomlauncher.log` next to the exe (rotates to `.old` at 1 MB)
 - `DoomLauncher/DoomLauncher.csproj` — .NET 8, `WinExe`, `PublishSingleFile=true`, `SelfContained=false`
-- `steam_shim/steam_api64.c` — Proxy shim: on DLL_PROCESS_ATTACH spawns `DoomLauncher.exe` and then TERMINATES the host engine process (TerminateProcess on self) before the engine's main() runs — Steam's Play button becomes "launch DoomLauncher". User-accepted trade-off: Steam shows the rerelease as "not running" during UZDoom sessions (no rerelease playtime/overlay). Exports are linker-level forwarders via `#pragma comment(linker, "/export:<name>=steam_api64_o.<name>")` directives (no forwarding code)
+- `steam_shim/steam_api64.c` — Proxy shim (playtime-preserving FREEZE): on DLL_PROCESS_ATTACH duplicates a real handle to the engine's main thread (GetCurrentThread() is a pseudo-handle — duplication must happen on the main thread), spawns a worker thread, returns. The worker SUSPENDS the main thread as its very first action — before the engine reaches main() (no window, no audio, no Steamworks calls, 0% CPU) — then spawns `DoomLauncher.exe` and waits on it. When the launcher exits (after UZDoom closes + save backup), the frozen engine is terminated with the launcher's exit code, ending the Steam session; doom.exe stays alive all session so Steam accrues playtime. Suspend failure falls back to instant-kill (TerminateProcess on self). Exports are linker-level forwarders via `#pragma comment(linker, "/export:<name>=steam_api64_o.<name>")` directives (no forwarding code)
 - `steam_shim/generate-exports.ps1` — Regenerates the `/export` pragma block in steam_api64.c from a Valve DLL + engine exe (run after engine updates)
 - `config.ini` — User-edited config (do not overwrite)
 
@@ -40,6 +40,7 @@ Shim debug log: `steam_shim.log` next to the game exe (attach detection, launche
 - MSVC's newer def-file parser (VS 18 2026 toolset) rejects def-file forwarders with LNK2001 ×N — that's why forwarding uses `/export` linker pragmas in the C source instead of a .def file (do not reintroduce one).
 - Engine imports exactly 11 Steamworks symbols (verified from `doom.exe.old` import table); the def covers those plus verified-safe extras.
 - Shim code is CRT-free in DllMain (kernel32 only, stack buffers, no thread-attach work) — loader-lock safe. A single-instance mutex (`Local\DoomLauncherShimMutex`) prevents double launcher spawns.
+- Freeze invariant: NEVER return from the worker thread while the main thread is suspended — every failure path after the suspend must TerminateProcess (self), or the engine hangs frozen forever. Instant-kill survives only as the SuspendThread-failure fallback.
 - If `config.ini` is missing the shim stays silent (game runs vanilla); if `config.ini` exists but `DoomLauncher.exe` is missing it logs and continues.
 - .NET 8 Desktop Runtime required on target machine for the launcher
 - `Application.EnableVisualStyles()` is required before showing `TaskDialog`

@@ -10,18 +10,20 @@
 // Steam overlay, achievements, cloud saves, and ownership checks all behave exactly
 // as with the original DLL.
 //
-// The only added behavior: when the game process (doom.exe) loads this DLL, DllMain
-// starts DoomLauncher.exe from the same directory and then TERMINATES the host
-// engine process (TerminateProcess on our own process). This runs during
-// DLL_PROCESS_ATTACH — long before the engine's main() — so the engine never
-// creates a window, plays audio, or runs game logic: pressing Play in Steam
-// effectively becomes "launch DoomLauncher", which shows its usual dialogs,
-// syncs saves, and starts UZDoom.
+// The only added behavior: when the game process (doom.exe) loads this DLL,
+// DllMain duplicates a real handle to the engine's main thread, hands the work
+// to a worker thread, and returns immediately. The worker SUSPENDS the main
+// thread before the engine can reach main(), then starts DoomLauncher.exe from
+// the same directory. The engine process therefore stays ALIVE for the whole
+// UZDoom session — frozen: no window, no audio, no Steamworks calls, 0% CPU —
+// which is what makes Steam count the session as DOOM playtime ("playing DOOM,
+// but modded"). When DoomLauncher exits (it waits for UZDoom and performs the
+// save backup), the worker terminates the frozen engine with the launcher's
+// exit code, ending the Steam session at the right moment.
 //
-// Known trade-off (accepted by the user): because the engine exits almost
-// instantly, Steam shows the rerelease as "not running" during the UZDoom
-// session — no rerelease playtime, overlay, or rich presence. The forwards are
-// retained so a stock deployment without DoomLauncher still works fully vanilla.
+// If the main thread cannot be suspended, the worker falls back to the old
+// instant-kill behavior (TerminateProcess on self) rather than letting the
+// engine boot alongside UZDoom or leaving the process hung.
 //
 // If DoomLauncher.exe or config.ini is missing, the shim does nothing and the game
 // launches vanilla through the forwards — deleting the launcher files (or renaming
@@ -87,6 +89,11 @@
 // the same instant, only the first spawns DoomLauncher (prevents double UZDoom
 // launches and concurrent save-sync runs).
 static HANDLE g_singleInstanceMutex = NULL;
+
+// Real handle to the engine's main thread, duplicated on that thread inside
+// DllMain — GetCurrentThread() is only a pseudo-handle valid on the calling
+// thread, so the duplication must happen here, not in the worker.
+static HANDLE g_hMainThread = NULL;
 
 // CRT-free helpers: DllMain runs under the loader lock, so keep every operation
 // down to kernel32 calls on fixed-size stack buffers.
@@ -205,6 +212,8 @@ static void ShimLogW(const wchar_t *dir, const wchar_t *msg1, DWORD error)
     CloseHandle(h);
 }
 
+static DWORD WINAPI ShimWorkerThread(LPVOID arg);
+
 static void ShimStartLauncher(void)
 {
     wchar_t dir[MAX_PATH];
@@ -244,6 +253,77 @@ static void ShimStartLauncher(void)
         return;
     }
 
+    // Duplicate a REAL handle to the current (main) thread. GetCurrentThread()
+    // returns a pseudo-handle that is only meaningful on the calling thread, so
+    // this must happen here on the main thread — the worker cannot do it.
+    HANDLE hMainThread = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                         GetCurrentProcess(), &hMainThread, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS))
+    {
+        ShimLogW(dir, L"Failed to duplicate main-thread handle; game continues vanilla.", GetLastError());
+        return;
+    }
+
+    // Hand the freeze + launcher work to a worker thread so DllMain returns
+    // immediately and the loader lock is released (never block inside DllMain).
+    // The store below happens before CreateThread, so the worker observes it.
+    g_hMainThread = hMainThread;
+    HANDLE hWorker = CreateThread(NULL, 0, ShimWorkerThread, NULL, 0, NULL);
+    if (hWorker == NULL)
+    {
+        // No worker = no freeze and no launcher; the engine would boot vanilla.
+        ShimLogW(dir, L"Failed to create worker thread; game continues vanilla.", GetLastError());
+        CloseHandle(hMainThread);
+        g_hMainThread = NULL;
+        return;
+    }
+    CloseHandle(hWorker); // we never join the worker; it lives for the session
+}
+
+// Worker thread: suspends the engine's main thread BEFORE it can reach main()
+// (no window, no audio, no Steamworks calls, 0% CPU), then runs DoomLauncher
+// and keeps the engine process alive — suspended — for the whole UZDoom
+// session so Steam accrues playtime. When the launcher exits (it waits for
+// UZDoom and performs the save backup), the engine is terminated with the
+// launcher's exit code, which ends the Steam session.
+static DWORD WINAPI ShimWorkerThread(LPVOID arg)
+{
+    (void)arg;
+
+    wchar_t dir[MAX_PATH];
+    if (!ShimSelfDirW((const void *)&ShimWorkerThread, dir, MAX_PATH))
+    {
+        // Purely defensive: this failure happens before the suspend, so the
+        // engine would still boot vanilla without the launcher. Tear down
+        // anyway so a frozen-hang is impossible from any path below.
+        TerminateProcess(GetCurrentProcess(), 1);
+        return 1;
+    }
+
+    // Freeze the main thread FIRST — before spawning anything. This is the only
+    // instant at which the engine could get past DllMain and start creating a
+    // window or audio, so the suspend must land as the very first action.
+    if (g_hMainThread == NULL || SuspendThread(g_hMainThread) == (DWORD)-1)
+    {
+        // Cannot freeze: fall back to the previous instant-kill behavior rather
+        // than letting the engine boot alongside UZDoom or hanging forever.
+        ShimLogW(dir, L"Failed to suspend main thread; terminating engine (fallback).", GetLastError());
+        TerminateProcess(GetCurrentProcess(), 0);
+        return 1;
+    }
+    ShimLogW(dir, L"Main thread suspended; engine frozen before main().", 0);
+
+    wchar_t exePath[MAX_PATH];
+    if (!ShimJoinPathW(exePath, MAX_PATH, dir, LAUNCHER_EXE_NAME))
+    {
+        // Main thread is already suspended here; returning would leave the
+        // engine frozen forever.
+        ShimLogW(dir, L"Internal error: failed to build launcher path; terminating engine.", 0);
+        TerminateProcess(GetCurrentProcess(), 1);
+        return 1;
+    }
+
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     SecureZeroMemory(&si, sizeof(si));
@@ -260,30 +340,29 @@ static void ShimStartLauncher(void)
     if (!CreateProcessW(exePath, cmdLine, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi))
     {
         ShimLogW(dir, L"Failed to start " LAUNCHER_EXE_NAME, GetLastError());
-        return;
+        // Nothing preserves the session without the launcher; tear the frozen
+        // engine down instead of leaving it suspended forever.
+        TerminateProcess(GetCurrentProcess(), 1);
+        return 1;
     }
 
-    // The launcher is a separate process and outlives us; drop our handles to it.
     CloseHandle(pi.hThread);
+    ShimLogW(dir, L"Started " LAUNCHER_EXE_NAME L"; engine stays suspended for the session.", 0);
+
+    // Block until the launcher exits (DoomLauncher waits for UZDoom and syncs
+    // saves before exiting). Keeping this process handle open also keeps the
+    // worker alive for the whole session.
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    DWORD launcherExit = 0;
+    GetExitCodeProcess(pi.hProcess, &launcherExit);
     CloseHandle(pi.hProcess);
-    ShimLogW(dir, L"Started " LAUNCHER_EXE_NAME L"; terminating engine process.", 0);
 
-    // Kill the host engine NOW, while we are still inside DLL_PROCESS_ATTACH —
-    // the engine's main() has not run yet, so it has created no window, played
-    // no audio, and run no game logic. Without this, the engine would keep
-    // booting alongside UZDoom (the whole point of this shim is that Steam's
-    // Play button launches the launcher INSTEAD of the engine).
-    //
-    // Known trade-off (user-accepted): Steam shows the game as "not running"
-    // for the rest of the UZDoom session — no rerelease playtime or overlay.
-    // (Alternative not taken: keep the engine alive and terminate it from a
-    // background thread once the launcher exits — preserves Steam's in-game
-    // status but shows the engine window/audio for the whole session.)
-    ShimLogW(dir, L"Terminating engine process (exit code 0).", 0);
-    TerminateProcess(GetCurrentProcess(), 0);
-
-    // Not reached on success; keep the return for compiler happiness and as a
-    // fallback if TerminateProcess unexpectedly fails.
+    ShimLogW(dir, L"DoomLauncher exited; terminating suspended engine.", 0);
+    // End the frozen engine with the launcher's exit code — Steam ends the
+    // "DOOM" play session here, so playtime covers the real session length.
+    TerminateProcess(GetCurrentProcess(), launcherExit);
+    return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
@@ -299,6 +378,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     {
         if (g_singleInstanceMutex != NULL)
             CloseHandle(g_singleInstanceMutex);
+        if (g_hMainThread != NULL)
+            CloseHandle(g_hMainThread);
     }
 
     return TRUE;
