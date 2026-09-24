@@ -20,7 +20,7 @@ Game dir: `C:\Program Files (x86)\Steam\steamapps\common\Ultimate Doom\rerelease
 - `steam_api64.dll.orig` — untouched copy of Valve's DLL (rollback)
 - `DoomLauncher.exe` + `config.ini` — launcher, as before
 
-Shim debug log: `steam_shim.log` next to the game exe (written only on launcher-spawn failures/successes).
+Shim debug log: `steam_shim.log` next to the game exe (attach detection, launcher-spawn success/failure, engine-termination line).
 
 ## Project structure
 
@@ -29,7 +29,7 @@ Shim debug log: `steam_shim.log` next to the game exe (written only on launcher-
 - `DoomLauncher/SyncManager.cs` — Save/config backup and restore logic
 - `DoomLauncher/Logger.cs` — Best-effort append-only log at `doomlauncher.log` next to the exe (rotates to `.old` at 1 MB)
 - `DoomLauncher/DoomLauncher.csproj` — .NET 8, `WinExe`, `PublishSingleFile=true`, `SelfContained=false`
-- `steam_shim/steam_api64.c` — Proxy shim: spawns `DoomLauncher.exe` on DLL_PROCESS_ATTACH; exports are linker-level forwarders via `#pragma comment(linker, "/export:<name>=steam_api64_o.<name>")` directives (no forwarding code)
+- `steam_shim/steam_api64.c` — Proxy shim: on DLL_PROCESS_ATTACH spawns `DoomLauncher.exe` and then TERMINATES the host engine process (TerminateProcess on self) before the engine's main() runs — Steam's Play button becomes "launch DoomLauncher". User-accepted trade-off: Steam shows the rerelease as "not running" during UZDoom sessions (no rerelease playtime/overlay). Exports are linker-level forwarders via `#pragma comment(linker, "/export:<name>=steam_api64_o.<name>")` directives (no forwarding code)
 - `steam_shim/generate-exports.ps1` — Regenerates the `/export` pragma block in steam_api64.c from a Valve DLL + engine exe (run after engine updates)
 - `config.ini` — User-edited config (do not overwrite)
 

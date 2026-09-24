@@ -66,9 +66,9 @@ All paths are resolved relative to the directory containing `DoomLauncher.exe`.
 
 ## Steam integration (steam_api64.dll shim)
 
-Instead of hijacking `doom.exe` with a hardlink, the repo ships a tiny proxy `steam_api64.dll` (see `steam_shim/`). When the real engine loads its Steamworks DLL, the shim forwards every Steamworks export to the original Valve DLL (renamed to `steam_api64_o.dll`) and starts `DoomLauncher.exe` from the same folder.
+Instead of hijacking `doom.exe` with a hardlink, the repo ships a tiny proxy `steam_api64.dll` (see `steam_shim/`). When the real engine loads its Steamworks DLL, the shim forwards every Steamworks export to the original Valve DLL (renamed to `steam_api64_o.dll`), starts `DoomLauncher.exe` from the same folder, and then immediately terminates the engine process — while the DLL is still loading, long before the engine's `main()` runs, so no engine window or audio ever appears.
 
-Steam's Play button therefore launches UZDoom through DoomLauncher, while the engine process keeps a fully functional (unmodified, forwarded) Steamworks: overlay, achievements, Steam Cloud and play-state all behave normally. If the shim or launcher files are removed, the game simply runs vanilla.
+Steam's Play button therefore launches UZDoom through DoomLauncher and nothing else. **Trade-off (accepted):** because the engine exits almost instantly, Steam shows the rerelease as "not running" for the rest of the UZDoom session — no rerelease playtime, overlay, or rich presence. The forwards are kept so the shim stays transparent, and if the shim or launcher files are removed, the game simply runs vanilla.
 
 The shim hooks nothing — the forwarding is emitted by the linker as PE export-forwarding records from `#pragma comment(linker, "/export:...")` directives in `steam_api64.c`, so there is zero Steamworks-altering code and no def file involved. If a DOOM engine update changes its import table, regenerate the pragma block with `steam_shim/generate-exports.ps1` (see the script header) and rebuild.
 

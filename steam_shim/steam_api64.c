@@ -11,10 +11,17 @@
 // as with the original DLL.
 //
 // The only added behavior: when the game process (doom.exe) loads this DLL, DllMain
-// starts DoomLauncher.exe from the same directory. DoomLauncher reads config.ini,
-// shows its usual dialogs, syncs saves, launches UZDoom, and waits for it. The
-// engine process keeps running underneath with fully functional (forwarded)
-// Steamworks, which keeps Steam's play-state, rich presence, and overlay sane.
+// starts DoomLauncher.exe from the same directory and then TERMINATES the host
+// engine process (TerminateProcess on our own process). This runs during
+// DLL_PROCESS_ATTACH — long before the engine's main() — so the engine never
+// creates a window, plays audio, or runs game logic: pressing Play in Steam
+// effectively becomes "launch DoomLauncher", which shows its usual dialogs,
+// syncs saves, and starts UZDoom.
+//
+// Known trade-off (accepted by the user): because the engine exits almost
+// instantly, Steam shows the rerelease as "not running" during the UZDoom
+// session — no rerelease playtime, overlay, or rich presence. The forwards are
+// retained so a stock deployment without DoomLauncher still works fully vanilla.
 //
 // If DoomLauncher.exe or config.ini is missing, the shim does nothing and the game
 // launches vanilla through the forwards — deleting the launcher files (or renaming
@@ -256,11 +263,27 @@ static void ShimStartLauncher(void)
         return;
     }
 
-    // The launcher outlives us only as a separate process; we hold no handles
-    // beyond these two, which we can drop immediately.
+    // The launcher is a separate process and outlives us; drop our handles to it.
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    ShimLogW(dir, L"Started " LAUNCHER_EXE_NAME, 0);
+    ShimLogW(dir, L"Started " LAUNCHER_EXE_NAME L"; terminating engine process.", 0);
+
+    // Kill the host engine NOW, while we are still inside DLL_PROCESS_ATTACH —
+    // the engine's main() has not run yet, so it has created no window, played
+    // no audio, and run no game logic. Without this, the engine would keep
+    // booting alongside UZDoom (the whole point of this shim is that Steam's
+    // Play button launches the launcher INSTEAD of the engine).
+    //
+    // Known trade-off (user-accepted): Steam shows the game as "not running"
+    // for the rest of the UZDoom session — no rerelease playtime or overlay.
+    // (Alternative not taken: keep the engine alive and terminate it from a
+    // background thread once the launcher exits — preserves Steam's in-game
+    // status but shows the engine window/audio for the whole session.)
+    ShimLogW(dir, L"Terminating engine process (exit code 0).", 0);
+    TerminateProcess(GetCurrentProcess(), 0);
+
+    // Not reached on success; keep the return for compiler happiness and as a
+    // fallback if TerminateProcess unexpectedly fails.
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
