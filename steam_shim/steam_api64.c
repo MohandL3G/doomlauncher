@@ -21,8 +21,8 @@
 // this DLL away) is a complete uninstall.
 //
 // Build: CMake (see CMakeLists.txt) with MSVC x64. Links nothing beyond kernel32.
-// Diagnostics: failures while spawning the launcher are appended (best effort,
-// UTF-16) to steam_shim.log next to the game exe.
+// Diagnostics: attach progress and launcher-spawn failures are appended (best
+// effort, UTF-16) to steam_shim.log next to the game exe.
 //
 // Forwarding mechanism: `#pragma comment(linker, "/export:...")` directives
 // below — the documented /export:name=otherdll.name forwarder form (the same
@@ -63,8 +63,9 @@
 #pragma comment(linker, "/export:GetHSteamUser=steam_api64_o.GetHSteamUser")
 #pragma comment(linker, "/export:GetHSteamPipe=steam_api64_o.GetHSteamPipe")
 
-// Game server API (verified present; harmless if unused)
-#pragma comment(linker, "/export:SteamGameServer_Init=steam_api64_o.SteamGameServer_Init")
+// Game server API (verified present; harmless if unused). Note: the modern
+// Steamworks ABI exports SteamGameServer_InitSafe — there is no plain
+// SteamGameServer_Init — so only the symbols that really exist are forwarded.
 #pragma comment(linker, "/export:SteamGameServer_Shutdown=steam_api64_o.SteamGameServer_Shutdown")
 #pragma comment(linker, "/export:SteamGameServer_RunCallbacks=steam_api64_o.SteamGameServer_RunCallbacks")
 
@@ -204,7 +205,9 @@ static void ShimStartLauncher(void)
     if (!ShimJoinPathW(configPath, MAX_PATH, dir, LAUNCHER_CONFIG_NAME))
         return;
     if (GetFileAttributesW(configPath) == INVALID_FILE_ATTRIBUTES)
-        return;
+        return; // Not a DoomLauncher deployment -> stay fully invisible.
+
+    ShimLogW(dir, L"attach: shim loaded; DoomLauncher deployment detected.", 0);
 
     wchar_t exePath[MAX_PATH];
     if (!ShimJoinPathW(exePath, MAX_PATH, dir, LAUNCHER_EXE_NAME))
@@ -216,11 +219,17 @@ static void ShimStartLauncher(void)
         return;
     }
 
+    // CreateMutexW does NOT reset the last error on success — only sets it to
+    // ERROR_ALREADY_EXISTS when the mutex exists. Clear it first, or a stale
+    // value from earlier loader activity is misread as "already exists" and
+    // the launcher silently never starts.
+    SetLastError(0);
     g_singleInstanceMutex = CreateMutexW(NULL, FALSE, SINGLE_INSTANCE_MUTEX);
     if (g_singleInstanceMutex != NULL &&
         GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        // A launcher is already managing this game session.
+        ShimLogW(dir, L"attach: launcher mutex already held; not starting a second "
+                      L"DoomLauncher.", 0);
         return;
     }
 
