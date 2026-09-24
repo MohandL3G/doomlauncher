@@ -1,4 +1,4 @@
-# generate-exports.ps1 — regenerate steam_api64.def from a Valve steam_api64.dll.
+# generate-exports.ps1 — regenerate the /export pragma block in steam_api64.c.
 #
 # Run this when a DOOM engine update changes which Steamworks functions are
 # imported (symptom: the game fails to start with the shim installed and
@@ -9,12 +9,15 @@
 #   powershell -File generate-exports.ps1 -ValveDll steam_api64_o.dll -EngineExe doom.exe
 #
 # The script cross-references the engine's import names with the Valve DLL's
-# export names, so the regenerated .def only forwards symbols that actually
-# exist in the installed Valve DLL. Commit the regenerated .def and re-run CI.
+# export names, so the regenerated pragma block only forwards symbols that
+# actually exist in the installed Valve DLL (a forward to a missing export
+# breaks module load). It rewrites steam_api64.c in place: existing
+# `#pragma comment(linker, "/export:...")` lines are removed and the new block
+# is inserted just above `#define LAUNCHER_EXE_NAME`. Commit the regenerated
+# file and re-run CI.
 param(
     [Parameter(Mandatory = $true)] [string] $ValveDll,
-    [Parameter(Mandatory = $true)] [string] $EngineExe,
-    [string] $OutDef = "steam_api64.def"
+    [Parameter(Mandatory = $true)] [string] $EngineExe
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,14 +53,11 @@ function Get-PEImports([string] $Path) {
             $sections += [pscustomobject]@{ VA = $virtualAddress; RawSize = $rawSize; RawPtr = $rawPointer }
         }
 
-        $magic = $null
-        # optional header starts right after section-table calc above; recompute:
-        $fs.Seek($peOffset + 4 + 20, "Begin") | Out-Null
-        $magic = $br.ReadUInt16()
-        if ($magic -eq 0x20B) { $importDirRva = 0x90 } else { $importDirRva = 0x60 }
-        $fs.Seek($peOffset + 4 + 20 + $importDirRva + 0, "Begin") | Out-Null
         # For PE32+ the import dir RVA is at optional+120; PE32 at optional+96.
-        $dirRvaOffset = $peOffset + 4 + 20 + ($(if ($magic -eq 0x20B) { 120 } else { 96 }))
+        $magicOffset = $peOffset + 4 + 20
+        $fs.Seek($magicOffset, "Begin") | Out-Null
+        $magic = $br.ReadUInt16()
+        $dirRvaOffset = $peOffset + 4 + 20 + $(if ($magic -eq 0x20B) { 120 } else { 96 })
         $fs.Seek($dirRvaOffset, "Begin") | Out-Null
         $importRva = $br.ReadUInt32()
 
@@ -177,18 +177,11 @@ $valveExports = Get-PEDllExports $ValveDll
 
 $steamEngine = $engineNames | Where-Object { $_ -match '^(SteamAPI_|SteamInternal_|SteamGameServer_|GetHSteam)' } | Sort-Object -Unique
 
-$lines = @(
-    "; steam_api64.def — regenerated $(Get-Date -Format u) by generate-exports.ps1",
-    "; Engine: $EngineExe   Valve DLL: $ValveDll",
-    "",
-    "EXPORTS",
-    ""
-)
-
 $missing = @()
+$forwards = @()
 foreach ($name in $steamEngine) {
     if ($valveExports -contains $name) {
-        $lines += "$name=steam_api64_o.$name"
+        $forwards += "#pragma comment(linker, `"/export:$name=steam_api64_o.$name`")"
     } else {
         $missing += $name
     }
@@ -197,6 +190,27 @@ foreach ($name in $steamEngine) {
 if ($missing.Count -gt 0) {
     Write-Warning "Engine imports NOT present in Valve DLL (skipped, verify manually): $($missing -join ', ')"
 }
+if ($forwards.Count -eq 0) {
+    throw "No forwardable symbols found — refusing to write an empty block."
+}
 
-[System.IO.File]::WriteAllLines((Join-Path $PSScriptRoot $OutDef), $lines)
-Write-Host "Wrote $(Join-Path $PSScriptRoot $OutDef) with $($steamEngine.Count - $missing.Count) forwards."
+# Splice into steam_api64.c: drop existing /export pragmas, insert the
+# regenerated block right above the shim's first #define. LF line endings are
+# preserved (WriteAllText with explicit joins, not WriteAllLines).
+$sourcePath = Join-Path $PSScriptRoot "steam_api64.c"
+$source = [System.IO.File]::ReadAllLines($sourcePath)
+$kept = @($source | Where-Object { $_ -notmatch '^#pragma comment\(linker, "/export:' })
+
+$defineIndex = -1
+for ($i = 0; $i -lt $kept.Count; $i++) {
+    if ($kept[$i] -like '#define LAUNCHER_EXE_NAME*') { $defineIndex = $i; break }
+}
+if ($defineIndex -lt 0) { throw "Could not find '#define LAUNCHER_EXE_NAME' in steam_api64.c" }
+
+$newSource = @($kept[0..($defineIndex - 1)]) + $forwards + @("") + @($kept[$defineIndex..($kept.Count - 1)])
+[System.IO.File]::WriteAllText($sourcePath, (($newSource -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+Write-Host "Updated $sourcePath with $($forwards.Count) /export forwards."
+if ($missing.Count -gt 0) {
+    Write-Warning "Skipped $($missing.Count) engine import(s) missing from the Valve DLL (see warning above)."
+}

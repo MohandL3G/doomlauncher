@@ -4,8 +4,9 @@
 // but much smaller: this DLL does NOT hook or alter any Steamworks behavior. Every
 // Steamworks export is forwarded 1:1 to the original Valve DLL, which must be placed
 // next to this file renamed as `steam_api64_o.dll` (SmokeAPI's naming convention).
-// The forwarding itself is done by the linker via export-forwarding directives in
-// steam_api64.def — there is no forwarding code here and no hooking anywhere, so the
+// The forwarding itself is done by the linker via export-forwarding records
+// emitted from the `#pragma comment(linker, "/export:...")` directives below —
+// there is no forwarding code here and no hooking anywhere, so the
 // Steam overlay, achievements, cloud saves, and ownership checks all behave exactly
 // as with the original DLL.
 //
@@ -22,11 +23,52 @@
 // Build: CMake (see CMakeLists.txt) with MSVC x64. Links nothing beyond kernel32.
 // Diagnostics: failures while spawning the launcher are appended (best effort,
 // UTF-16) to steam_shim.log next to the game exe.
+//
+// Forwarding mechanism: `#pragma comment(linker, "/export:...")` directives
+// below — the documented /export:name=otherdll.name forwarder form (the same
+// technique the classic proxy-DLL generators use). A .def file was tried first
+// and rejected by MSVC's newer def parser, which treated every forwarder as a
+// local symbol to implement (LNK2001 x19); pragma exports go through the same
+// linker flag but are parsed as raw linker options, so they always work.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+
+// --- Export forwarding --------------------------------------------------------
+// Every Steamworks symbol the engine (or legacy tooling) may import is exported
+// from this DLL as a forwarder record to steam_api64_o.dll. The linker creates
+// pure PE export-forwarding entries (no code, no CRT, no load-time dependency
+// beyond the name). Keep in sync with the installed Valve DLL — see
+// generate-exports.ps1. A forward to a symbol MISSING from steam_api64_o.dll
+// breaks module load at start-up, so only verified-present symbols are listed.
+
+#pragma comment(linker, "/export:SteamAPI_Init=steam_api64_o.SteamAPI_Init")
+#pragma comment(linker, "/export:SteamAPI_RestartAppIfNecessary=steam_api64_o.SteamAPI_RestartAppIfNecessary")
+#pragma comment(linker, "/export:SteamAPI_RegisterCallback=steam_api64_o.SteamAPI_RegisterCallback")
+#pragma comment(linker, "/export:SteamAPI_UnregisterCallback=steam_api64_o.SteamAPI_UnregisterCallback")
+#pragma comment(linker, "/export:SteamAPI_RegisterCallResult=steam_api64_o.SteamAPI_RegisterCallResult")
+#pragma comment(linker, "/export:SteamAPI_UnregisterCallResult=steam_api64_o.SteamAPI_UnregisterCallResult")
+#pragma comment(linker, "/export:SteamAPI_RunCallbacks=steam_api64_o.SteamAPI_RunCallbacks")
+#pragma comment(linker, "/export:SteamAPI_Shutdown=steam_api64_o.SteamAPI_Shutdown")
+#pragma comment(linker, "/export:SteamAPI_GetHSteamUser=steam_api64_o.SteamAPI_GetHSteamUser")
+#pragma comment(linker, "/export:SteamAPI_IsSteamRunning=steam_api64_o.SteamAPI_IsSteamRunning")
+#pragma comment(linker, "/export:SteamAPI_ManualDispatch_Init=steam_api64_o.SteamAPI_ManualDispatch_Init")
+#pragma comment(linker, "/export:SteamAPI_ManualDispatch_RunFrame=steam_api64_o.SteamAPI_ManualDispatch_RunFrame")
+#pragma comment(linker, "/export:SteamInternal_ContextInit=steam_api64_o.SteamInternal_ContextInit")
+#pragma comment(linker, "/export:SteamInternal_FindOrCreateUserInterface=steam_api64_o.SteamInternal_FindOrCreateUserInterface")
+
+// Bare HSteam handles (legacy ABI, verified present in the installed DLL)
+#pragma comment(linker, "/export:GetHSteamUser=steam_api64_o.GetHSteamUser")
+#pragma comment(linker, "/export:GetHSteamPipe=steam_api64_o.GetHSteamPipe")
+
+// Game server API (verified present; harmless if unused)
+#pragma comment(linker, "/export:SteamGameServer_Init=steam_api64_o.SteamGameServer_Init")
+#pragma comment(linker, "/export:SteamGameServer_Shutdown=steam_api64_o.SteamGameServer_Shutdown")
+#pragma comment(linker, "/export:SteamGameServer_RunCallbacks=steam_api64_o.SteamGameServer_RunCallbacks")
+
+// -----------------------------------------------------------------------------
 
 #define LAUNCHER_EXE_NAME L"DoomLauncher.exe"
 #define LAUNCHER_CONFIG_NAME L"config.ini"

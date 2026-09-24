@@ -70,7 +70,7 @@ Instead of hijacking `doom.exe` with a hardlink, the repo ships a tiny proxy `st
 
 Steam's Play button therefore launches UZDoom through DoomLauncher, while the engine process keeps a fully functional (unmodified, forwarded) Steamworks: overlay, achievements, Steam Cloud and play-state all behave normally. If the shim or launcher files are removed, the game simply runs vanilla.
 
-The shim forwards nothing it hooks — the forwarding is done by the linker as export-forwarding records, so there is zero Steamworks-altering code. `steam_api64.def` lists the forwarded symbols; if a DOOM engine update changes its import table, regenerate it with `steam_shim/generate-exports.ps1` (see the script header) and rebuild.
+The shim hooks nothing — the forwarding is emitted by the linker as PE export-forwarding records from `#pragma comment(linker, "/export:...")` directives in `steam_api64.c`, so there is zero Steamworks-altering code and no def file involved. If a DOOM engine update changes its import table, regenerate the pragma block with `steam_shim/generate-exports.ps1` (see the script header) and rebuild.
 
 ### Install (game rerelease folder)
 
@@ -96,4 +96,4 @@ Locally, the launcher still builds with the .NET 8 SDK:
 dotnet publish DoomLauncher/DoomLauncher.csproj -c Release -o output
 ```
 
-The shim needs MSVC (the `.def` uses MSVC export-forwarding syntax): `cmake -S steam_shim -B build -A x64 && cmake --build build --config Release`.
+The shim needs MSVC (forwarders use MSVC `/export` linker pragmas): `cmake -S steam_shim -B build -A x64 && cmake --build build --config Release`.

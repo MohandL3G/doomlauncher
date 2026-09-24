@@ -29,15 +29,15 @@ Shim debug log: `steam_shim.log` next to the game exe (written only on launcher-
 - `DoomLauncher/SyncManager.cs` — Save/config backup and restore logic
 - `DoomLauncher/Logger.cs` — Best-effort append-only log at `doomlauncher.log` next to the exe (rotates to `.old` at 1 MB)
 - `DoomLauncher/DoomLauncher.csproj` — .NET 8, `WinExe`, `PublishSingleFile=true`, `SelfContained=false`
-- `steam_shim/steam_api64.c` — Proxy shim: spawns `DoomLauncher.exe` on DLL_PROCESS_ATTACH; forwards nothing itself
-- `steam_shim/steam_api64.def` — Export-forwarding table; every entry forwards `<name>` → `steam_api64_o.<name>` (linker-level, no code)
-- `steam_shim/generate-exports.ps1` — Regenerates the def from a Valve DLL + engine exe (run after engine updates)
+- `steam_shim/steam_api64.c` — Proxy shim: spawns `DoomLauncher.exe` on DLL_PROCESS_ATTACH; exports are linker-level forwarders via `#pragma comment(linker, "/export:<name>=steam_api64_o.<name>")` directives (no forwarding code)
+- `steam_shim/generate-exports.ps1` — Regenerates the `/export` pragma block in steam_api64.c from a Valve DLL + engine exe (run after engine updates)
 - `config.ini` — User-edited config (do not overwrite)
 
 ## Key details
 
 - The shim must NEVER hook or wrap Steamworks; forwarding is linker export-forwarding to `steam_api64_o.dll`. Nothing Valve-signed is modified.
-- Def entries must only reference exports that exist in the INSTALLED Valve DLL (`SteamAPI_InitEx`/`InitFlat`/`ManualDispatch_GetNextEvent` are NOT present in the current one — verified). A forward to a missing export breaks module load.
+- Forwarder entries must only reference exports that exist in the INSTALLED Valve DLL (`SteamAPI_InitEx`/`InitFlat`/`ManualDispatch_GetNextEvent` are NOT present in the current one — verified). A forward to a missing export breaks module load.
+- MSVC's newer def-file parser (VS 18 2026 toolset) rejects def-file forwarders with LNK2001 ×N — that's why forwarding uses `/export` linker pragmas in the C source instead of a .def file (do not reintroduce one).
 - Engine imports exactly 11 Steamworks symbols (verified from `doom.exe.old` import table); the def covers those plus verified-safe extras.
 - Shim code is CRT-free in DllMain (kernel32 only, stack buffers, no thread-attach work) — loader-lock safe. A single-instance mutex (`Local\DoomLauncherShimMutex`) prevents double launcher spawns.
 - If `config.ini` is missing the shim stays silent (game runs vanilla); if `config.ini` exists but `DoomLauncher.exe` is missing it logs and continues.
